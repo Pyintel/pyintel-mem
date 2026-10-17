@@ -40,15 +40,44 @@ Pyintel Mem (`pmem`) v0.1.0 — Sub-Millisecond Binary Vector & Temporal Graph M
 Magic: 0x50 0x4D ('PM') | Quantization: SQ8 + BQ1 | Hybrid: Vector + BM25 + Graph + Decay
 
 USAGE:
-  pmem init   <file.pmem> [--dim 128] [--half-life 604800]
-  pmem store  <file.pmem> --text \"<fact>\" [--ns <namespace>] [--tags a,b] [--importance 1.0] [--pin]
-  pmem link   <file.pmem> --src <id> --dst <id> [--kind CAUSES|SUPERSEDES|RELATES_TO|PART_OF|DEPENDS_ON] [--weight 0.9]
-  pmem recall <file.pmem> \"<query>\" [--top-k 5] [--ns <namespace>] [--tag <tag>] [--json]
-  pmem stats  <file.pmem> [--json]
+  pmem recall [<file.pmem>] \"<query>\" [--top-k 5] [--ns <namespace>] [--tag <tag>] [--json]
+  pmem store  [<file.pmem>] \"<fact>\" [--ns <namespace>] [--tags a,b] [--importance 1.0] [--pin]
+  pmem link   [<file.pmem>] --src <id> --dst <id> [--kind CAUSES|SUPERSEDES|RELATES_TO|PART_OF|DEPENDS_ON] [--weight 0.9]
+  pmem stats  [<file.pmem>] [--json]
+  pmem init   [<file.pmem>] [--dim 128] [--half-life 604800]
   pmem bench  [--nodes 2000] [--dim 128]
-  pmem mcp    <file.pmem>
+  pmem mcp    [<file.pmem>]
 "
     );
+}
+
+fn default_db_path() -> PathBuf {
+    if let Ok(env_path) = env::var("PMEM_FILE") {
+        if !env_path.trim().is_empty() {
+            return PathBuf::from(env_path);
+        }
+    }
+    let workspace_primary = PathBuf::from(r"P:\Projects\Pyintel\Pyintel\pyintel-mem\workspace.pmem");
+    if workspace_primary.exists()
+        || Path::new(r"P:\Projects\Pyintel\Pyintel\pyintel-mem").exists()
+    {
+        return workspace_primary;
+    }
+    if let Ok(home) = env::var("USERPROFILE").or_else(|_| env::var("HOME")) {
+        return PathBuf::from(home).join(".pmem").join("workspace.pmem");
+    }
+    PathBuf::from("workspace.pmem")
+}
+
+/// If `args[0]` looks like an explicit `.pmem` path, consumes it; otherwise uses `default_db_path()`.
+fn resolve_db_and_args(args: &[String]) -> (PathBuf, &[String]) {
+    if let Some(first) = args.first() {
+        let lower = first.to_ascii_lowercase();
+        if !first.starts_with('-') && (lower.ends_with(".pmem") || lower.ends_with(".db")) {
+            return (PathBuf::from(first), &args[1..]);
+        }
+    }
+    (default_db_path(), args)
 }
 
 fn load_or_create(path: &Path, default_dim: usize, default_hl: f32) -> Result<PyintelMem, String> {
@@ -60,22 +89,19 @@ fn load_or_create(path: &Path, default_dim: usize, default_hl: f32) -> Result<Py
 }
 
 fn cmd_init(args: &[String]) -> Result<(), String> {
-    if args.is_empty() {
-        return Err("Usage: pmem init <file.pmem> [--dim 128] [--half-life 604800]".into());
-    }
-    let path = PathBuf::from(&args[0]);
+    let (path, rem) = resolve_db_and_args(args);
     let mut dim = 128usize;
     let mut half_life = 604_800.0f32;
 
-    let mut i = 1;
-    while i < args.len() {
-        match args[i].as_str() {
-            "--dim" if i + 1 < args.len() => {
-                dim = args[i + 1].parse().map_err(|_| "Invalid --dim")?;
+    let mut i = 0;
+    while i < rem.len() {
+        match rem[i].as_str() {
+            "--dim" if i + 1 < rem.len() => {
+                dim = rem[i + 1].parse().map_err(|_| "Invalid --dim")?;
                 i += 2;
             }
-            "--half-life" if i + 1 < args.len() => {
-                half_life = args[i + 1].parse().map_err(|_| "Invalid --half-life")?;
+            "--half-life" if i + 1 < rem.len() => {
+                half_life = rem[i + 1].parse().map_err(|_| "Invalid --half-life")?;
                 i += 2;
             }
             _ => i += 1,
@@ -96,11 +122,11 @@ fn cmd_init(args: &[String]) -> Result<(), String> {
 fn cmd_store(args: &[String]) -> Result<(), String> {
     if args.is_empty() {
         return Err(
-            "Usage: pmem store <file.pmem> --text \"<fact>\" [--ns default] [--tags a,b] [--importance 1.0] [--pin]"
+            "Usage: pmem store [<file.pmem>] \"<fact>\" [--ns default] [--tags a,b] [--importance 1.0] [--pin]"
                 .into(),
         );
     }
-    let path = PathBuf::from(&args[0]);
+    let (path, rem) = resolve_db_and_args(args);
     let mut text = String::new();
     let mut ns = String::from("default");
     let mut tags: Vec<String> = Vec::new();
@@ -108,35 +134,39 @@ fn cmd_store(args: &[String]) -> Result<(), String> {
     let mut pin = false;
     let mut custom_id: Option<u64> = None;
 
-    let mut i = 1;
-    while i < args.len() {
-        match args[i].as_str() {
-            "--text" | "-t" if i + 1 < args.len() => {
-                text = args[i + 1].clone();
+    let mut i = 0;
+    while i < rem.len() {
+        match rem[i].as_str() {
+            "--text" | "-t" if i + 1 < rem.len() => {
+                text = rem[i + 1].clone();
                 i += 2;
             }
-            "--ns" | "--namespace" if i + 1 < args.len() => {
-                ns = args[i + 1].clone();
+            "--ns" | "--namespace" if i + 1 < rem.len() => {
+                ns = rem[i + 1].clone();
                 i += 2;
             }
-            "--tags" if i + 1 < args.len() => {
-                tags = args[i + 1]
+            "--tags" if i + 1 < rem.len() => {
+                tags = rem[i + 1]
                     .split(',')
                     .map(|s| s.trim().to_string())
                     .filter(|s| !s.is_empty())
                     .collect();
                 i += 2;
             }
-            "--importance" if i + 1 < args.len() => {
-                importance = args[i + 1].parse().map_err(|_| "Invalid --importance")?;
+            "--importance" if i + 1 < rem.len() => {
+                importance = rem[i + 1].parse().map_err(|_| "Invalid --importance")?;
                 i += 2;
             }
-            "--id" if i + 1 < args.len() => {
-                custom_id = Some(args[i + 1].parse().map_err(|_| "Invalid --id")?);
+            "--id" if i + 1 < rem.len() => {
+                custom_id = Some(rem[i + 1].parse().map_err(|_| "Invalid --id")?);
                 i += 2;
             }
             "--pin" => {
                 pin = true;
+                i += 1;
+            }
+            other if !other.starts_with('-') && text.is_empty() => {
+                text = other.to_string();
                 i += 1;
             }
             _ => i += 1,
@@ -144,7 +174,7 @@ fn cmd_store(args: &[String]) -> Result<(), String> {
     }
 
     if text.is_empty() {
-        return Err("Missing required --text \"<fact>\"".into());
+        return Err("Missing fact text. Pass `pmem store \"<fact>\"` or `--text \"<fact>\"`.".into());
     }
 
     let mut mem = load_or_create(&path, 128, 604_800.0)?;
@@ -162,33 +192,33 @@ fn cmd_store(args: &[String]) -> Result<(), String> {
 fn cmd_link(args: &[String]) -> Result<(), String> {
     if args.is_empty() {
         return Err(
-            "Usage: pmem link <file.pmem> --src <id> --dst <id> [--kind CAUSES|SUPERSEDES|RELATES_TO|PART_OF|DEPENDS_ON] [--weight 0.9]"
+            "Usage: pmem link [<file.pmem>] --src <id> --dst <id> [--kind CAUSES|SUPERSEDES|RELATES_TO|PART_OF|DEPENDS_ON] [--weight 0.9]"
                 .into(),
         );
     }
-    let path = PathBuf::from(&args[0]);
+    let (path, rem) = resolve_db_and_args(args);
     let mut src: Option<u64> = None;
     let mut dst: Option<u64> = None;
     let mut kind = EdgeKind::RelatesTo;
     let mut weight = 0.9f32;
 
-    let mut i = 1;
-    while i < args.len() {
-        match args[i].as_str() {
-            "--src" if i + 1 < args.len() => {
-                src = Some(args[i + 1].parse().map_err(|_| "Invalid --src")?);
+    let mut i = 0;
+    while i < rem.len() {
+        match rem[i].as_str() {
+            "--src" if i + 1 < rem.len() => {
+                src = Some(rem[i + 1].parse().map_err(|_| "Invalid --src")?);
                 i += 2;
             }
-            "--dst" if i + 1 < args.len() => {
-                dst = Some(args[i + 1].parse().map_err(|_| "Invalid --dst")?);
+            "--dst" if i + 1 < rem.len() => {
+                dst = Some(rem[i + 1].parse().map_err(|_| "Invalid --dst")?);
                 i += 2;
             }
-            "--kind" if i + 1 < args.len() => {
-                kind = EdgeKind::from_str(&args[i + 1]);
+            "--kind" if i + 1 < rem.len() => {
+                kind = EdgeKind::from_str(&rem[i + 1]);
                 i += 2;
             }
-            "--weight" if i + 1 < args.len() => {
-                weight = args[i + 1].parse().map_err(|_| "Invalid --weight")?;
+            "--weight" if i + 1 < rem.len() => {
+                weight = rem[i + 1].parse().map_err(|_| "Invalid --weight")?;
                 i += 2;
             }
             _ => i += 1,
@@ -213,30 +243,30 @@ fn cmd_link(args: &[String]) -> Result<(), String> {
 }
 
 fn cmd_recall(args: &[String]) -> Result<(), String> {
-    if args.len() < 2 {
+    let (path, rem) = resolve_db_and_args(args);
+    if rem.is_empty() {
         return Err(
-            "Usage: pmem recall <file.pmem> \"<query>\" [--top-k 5] [--ns <namespace>] [--tag <tag>] [--json]"
+            "Usage: pmem recall [<file.pmem>] \"<query>\" [--top-k 5] [--ns <namespace>] [--tag <tag>] [--json]"
                 .into(),
         );
     }
-    let path = PathBuf::from(&args[0]);
-    let query = &args[1];
+    let query = &rem[0];
     let mut opts = QueryOptions::default();
     let mut as_json = false;
 
-    let mut i = 2;
-    while i < args.len() {
-        match args[i].as_str() {
-            "--top-k" | "-k" if i + 1 < args.len() => {
-                opts.top_k = args[i + 1].parse().map_err(|_| "Invalid --top-k")?;
+    let mut i = 1;
+    while i < rem.len() {
+        match rem[i].as_str() {
+            "--top-k" | "-k" if i + 1 < rem.len() => {
+                opts.top_k = rem[i + 1].parse().map_err(|_| "Invalid --top-k")?;
                 i += 2;
             }
-            "--ns" | "--namespace" if i + 1 < args.len() => {
-                opts.namespace = Some(args[i + 1].clone());
+            "--ns" | "--namespace" if i + 1 < rem.len() => {
+                opts.namespace = Some(rem[i + 1].clone());
                 i += 2;
             }
-            "--tag" if i + 1 < args.len() => {
-                opts.required_tag = Some(args[i + 1].clone());
+            "--tag" if i + 1 < rem.len() => {
+                opts.required_tag = Some(rem[i + 1].clone());
                 i += 2;
             }
             "--include-superseded" => {
@@ -292,10 +322,7 @@ fn cmd_recall(args: &[String]) -> Result<(), String> {
 }
 
 fn cmd_stats(args: &[String]) -> Result<(), String> {
-    if args.is_empty() {
-        return Err("Usage: pmem stats <file.pmem> [--json]".into());
-    }
-    let path = PathBuf::from(&args[0]);
+    let (path, _rem) = resolve_db_and_args(args);
     let file_size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
     let mem = PyintelMem::load_mmap(&path)?;
     let active = mem.records.iter().filter(|r| !r.is_tombstoned()).count();
