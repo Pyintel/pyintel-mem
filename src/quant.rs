@@ -162,9 +162,9 @@ impl Bq1Vector {
 }
 
 /// Deterministic feature-hashing text embedder (`HashEmbedder`) for zero-dependency
-/// character n-gram + word token semantic vectors when an external model is not attached.
+/// character n-gram + skip-gram + word token semantic vectors when an external model is not attached.
 /// Produces L2-normalized dense `f32` vectors of arbitrary dimension `D` using signed
-/// Murmur/FNV projections over word unigrams, bigrams, and character trigrams.
+/// CountSketch projections over stems, word unigrams, bigrams, character trigrams, and gapped trigrams.
 pub fn deterministic_text_embedding(text: &str, dim: usize) -> Vec<f32> {
     let mut vec = vec![0.0f32; dim];
     if dim == 0 || text.is_empty() {
@@ -172,30 +172,52 @@ pub fn deterministic_text_embedding(text: &str, dim: usize) -> Vec<f32> {
     }
 
     let lower = text.to_lowercase();
-    let tokens: Vec<&str> = lower
+    let raw_tokens: Vec<&str> = lower
         .split(|c: char| !c.is_alphanumeric() && c != '_' && c != '-')
-        .filter(|s| !s.is_empty())
+        .filter(|s| s.len() >= 2)
         .collect();
 
-    // 1. Word unigrams (weight 2.0)
-    for &tok in &tokens {
-        accumulate_token(&mut vec, tok.as_bytes(), 0x9E37_79B9, 2.0);
-        // Character trigrams inside word (weight 0.65) for subword / typo resilience
+    let mut content_tokens: Vec<&str> = Vec::with_capacity(raw_tokens.len());
+
+    // 1. Word unigrams + morphological stems + character trigrams + gapped skip-grams
+    for &tok in &raw_tokens {
+        if crate::bm25::Bm25Index::is_stopword(tok) {
+            // Very light weight for stop-words so conversational framing doesn't swamp technical content
+            accumulate_token(&mut vec, tok.as_bytes(), 0x9E37_79B9, 0.15);
+            continue;
+        }
+        content_tokens.push(tok);
+        accumulate_token(&mut vec, tok.as_bytes(), 0x9E37_79B9, 2.2);
+
+        let stem = crate::bm25::Bm25Index::stem_token(tok);
+        if stem != tok {
+            accumulate_token(&mut vec, stem.as_bytes(), 0x9E37_79B9, 1.4);
+        }
+
+        // Character trigrams inside word (weight 0.65) + gapped 1-skip trigrams (weight 0.45) for typo resilience
         let bytes = tok.as_bytes();
         if bytes.len() >= 3 {
             for win in bytes.windows(3) {
                 accumulate_token(&mut vec, win, 0x85EB_CA6B, 0.65);
             }
         }
+        if bytes.len() >= 4 {
+            for i in 0..(bytes.len() - 3) {
+                let skip_a = [bytes[i], bytes[i + 1], bytes[i + 3]];
+                let skip_b = [bytes[i], bytes[i + 2], bytes[i + 3]];
+                accumulate_token(&mut vec, &skip_a, 0x85EB_CA6B, 0.40);
+                accumulate_token(&mut vec, &skip_b, 0x85EB_CA6B, 0.40);
+            }
+        }
     }
 
-    // 2. Word bigrams (weight 1.25) for phrase order sensitivity
-    for pair in tokens.windows(2) {
+    // 2. Content word bigrams (weight 1.35) for phrase order sensitivity across non-stopwords
+    for pair in content_tokens.windows(2) {
         let mut buf = Vec::with_capacity(pair[0].len() + 1 + pair[1].len());
         buf.extend_from_slice(pair[0].as_bytes());
         buf.push(b'_');
         buf.extend_from_slice(pair[1].as_bytes());
-        accumulate_token(&mut vec, &buf, 0xC2B2_AE35, 1.25);
+        accumulate_token(&mut vec, &buf, 0xC2B2_AE35, 1.35);
     }
 
     // L2 normalize

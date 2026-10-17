@@ -221,4 +221,51 @@ mod tests {
 
         let _ = std::fs::remove_file(&tmp_path);
     }
+
+    #[test]
+    fn test_smart_typo_recovery_camelcase_and_consolidation() {
+        let mut mem = PyintelMem::new(128, 604_800.0);
+        let id1 = mem.store(
+            None,
+            "research",
+            "AutoVLA benchmark score achieved 0.2742m Mean ADE on ELISA Lab dataset",
+            vec!["vla".into()],
+            None,
+            1.5,
+            false,
+            Some(1_790_000_000),
+        );
+        // Storing the exact same fact in the same namespace should auto-consolidate into id1
+        let id_dup = mem.store(
+            None,
+            "research",
+            "AutoVLA benchmark score achieved 0.2742m Mean ADE on ELISA Lab dataset",
+            vec!["robotics".into()],
+            None,
+            2.0,
+            false,
+            Some(1_790_000_100),
+        );
+        assert_eq!(id1, id_dup);
+        assert_eq!(mem.records.len(), 1);
+        assert_eq!(mem.records[0].access_count, 2);
+        assert_eq!(mem.records[0].tags.len(), 2);
+
+        // Query with typos ("autvla", "scre") and conversational filler ("what is the")
+        let rep = mem.recall(
+            "what is the autvla ADE scre?",
+            QueryOptions {
+                top_k: 3,
+                ..Default::default()
+            },
+        );
+        assert!(!rep.hits.is_empty());
+        assert_eq!(rep.hits[0].id, id1);
+        assert!(
+            rep.hits[0].bm25_score > 0.4,
+            "Expected fuzzy BM25 typo recovery for 'autvla'/'scre', got {}",
+            rep.hits[0].bm25_score
+        );
+    }
 }
+

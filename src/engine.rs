@@ -162,6 +162,39 @@ impl PyintelMem {
         pinned: bool,
         timestamp: Option<u64>,
     ) -> u64 {
+        let now = timestamp.unwrap_or_else(Self::current_unix_secs);
+        let ns_clean = if namespace.trim().is_empty() {
+            "default"
+        } else {
+            namespace.trim()
+        };
+        let ns_hash = fnv1a_32(ns_clean.as_bytes());
+
+        // Smart Auto-Consolidation: if no explicit ID was forced and an active memory in the same
+        // namespace already has identical content, reinforce it in-place rather than duplicating.
+        if id.is_none() {
+            let trimmed_new = content.trim();
+            for rec in &mut self.records {
+                if !rec.is_tombstoned()
+                    && rec.namespace_hash == ns_hash
+                    && rec.content.trim().eq_ignore_ascii_case(trimmed_new)
+                {
+                    rec.access_count = rec.access_count.saturating_add(1);
+                    rec.last_accessed = now;
+                    rec.importance = rec.importance.max(importance.clamp(0.1, 10.0));
+                    if pinned {
+                        rec.flags |= NODE_FLAG_PINNED;
+                    }
+                    for t in tags {
+                        if !rec.tags.iter().any(|existing| existing.eq_ignore_ascii_case(&t)) {
+                            rec.tags.push(t);
+                        }
+                    }
+                    return rec.id;
+                }
+            }
+        }
+
         let assigned_id = id.unwrap_or_else(|| {
             let v = self.next_id;
             self.next_id += 1;
@@ -170,14 +203,6 @@ impl PyintelMem {
         if assigned_id >= self.next_id {
             self.next_id = assigned_id + 1;
         }
-
-        let now = timestamp.unwrap_or_else(Self::current_unix_secs);
-        let ns_clean = if namespace.trim().is_empty() {
-            "default"
-        } else {
-            namespace.trim()
-        };
-        let ns_hash = fnv1a_32(ns_clean.as_bytes());
 
         // Prepare dense vector (external embedding or deterministic n-gram CountSketch)
         let owned_vec;
@@ -435,7 +460,9 @@ impl PyintelMem {
 
             let base_relevance =
                 opts.weight_vector * v_s + opts.weight_bm25 * b_s + opts.weight_graph * g_s;
-            let final_score = base_relevance * decay * rec.importance;
+            // Multi-Signal Agreement Synergy: boosts nodes corroborated by both semantic vector and lexical/graph signals
+            let synergy = 1.0 + 0.25 * (v_s * b_s).sqrt() + 0.15 * g_s.min(1.0);
+            let final_score = base_relevance * synergy * decay * rec.importance;
 
             raw_ranked.push(RawScore {
                 slot,
