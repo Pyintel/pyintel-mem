@@ -39,9 +39,9 @@ pub fn crc32_ieee(data: &[u8]) -> u32 {
     !crc
 }
 
-/// Cross-platform read-only OS memory map (`CreateFileMappingW` / `MapViewOfFile` on Windows).
+/// Cross-platform read-only OS memory map (`MapViewOfFile` on Windows, `mmap` on Unix).
 pub struct MmapView {
-    #[cfg(target_os = "windows")]
+    #[cfg(any(target_os = "windows", unix))]
     ptr: *const u8,
     #[cfg(target_os = "windows")]
     map_handle: isize,
@@ -74,6 +74,19 @@ extern "system" {
     fn CloseHandle(hObject: isize) -> i32;
 }
 
+#[cfg(unix)]
+extern "C" {
+    fn mmap(
+        addr: *mut core::ffi::c_void,
+        len: usize,
+        prot: i32,
+        flags: i32,
+        fd: i32,
+        offset: i64,
+    ) -> *mut core::ffi::c_void;
+    fn munmap(addr: *mut core::ffi::c_void, len: usize) -> i32;
+}
+
 impl MmapView {
     /// Opens a file and maps it directly into the process address space via OS virtual memory.
     pub fn open(path: &Path) -> io::Result<Self> {
@@ -81,7 +94,7 @@ impl MmapView {
         let len = file.metadata()?.len() as usize;
         if len == 0 {
             return Ok(Self {
-                #[cfg(target_os = "windows")]
+                #[cfg(any(target_os = "windows", unix))]
                 ptr: core::ptr::null(),
                 #[cfg(target_os = "windows")]
                 map_handle: 0,
@@ -121,11 +134,30 @@ impl MmapView {
             }
         }
 
+        #[cfg(unix)]
+        {
+            use std::os::unix::io::AsRawFd;
+            const PROT_READ: i32 = 1;
+            const MAP_SHARED: i32 = 1;
+
+            let fd = file.as_raw_fd();
+            unsafe {
+                let ptr = mmap(core::ptr::null_mut(), len, PROT_READ, MAP_SHARED, fd, 0);
+                if ptr != (!0 as *mut core::ffi::c_void) && !ptr.is_null() {
+                    return Ok(Self {
+                        ptr: ptr as *const u8,
+                        len,
+                        fallback: None,
+                    });
+                }
+            }
+        }
+
         // Safe fallback if OS mapping is unavailable
         let mut buf = Vec::with_capacity(len);
         file.read_to_end(&mut buf)?;
         Ok(Self {
-            #[cfg(target_os = "windows")]
+            #[cfg(any(target_os = "windows", unix))]
             ptr: core::ptr::null(),
             #[cfg(target_os = "windows")]
             map_handle: 0,
@@ -134,7 +166,7 @@ impl MmapView {
         })
     }
 
-    /// Returns true if backed by an active OS virtual memory mapping (`MapViewOfFile`).
+    /// Returns true if backed by an active OS virtual memory mapping (`MapViewOfFile` or `mmap`).
     #[inline]
     pub fn is_native_mmap(&self) -> bool {
         self.fallback.is_none() && self.len > 0
@@ -146,11 +178,11 @@ impl MmapView {
         if let Some(ref vec) = self.fallback {
             return vec.as_slice();
         }
-        #[cfg(target_os = "windows")]
+        #[cfg(any(target_os = "windows", unix))]
         unsafe {
             core::slice::from_raw_parts(self.ptr, self.len)
         }
-        #[cfg(not(target_os = "windows"))]
+        #[cfg(not(any(target_os = "windows", unix)))]
         &[]
     }
 }
@@ -164,6 +196,12 @@ impl Drop for MmapView {
             }
             if self.map_handle != 0 {
                 CloseHandle(self.map_handle);
+            }
+        }
+        #[cfg(unix)]
+        unsafe {
+            if !self.ptr.is_null() {
+                munmap(self.ptr as *mut core::ffi::c_void, self.len);
             }
         }
     }

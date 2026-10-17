@@ -24,5 +24,5 @@ codegen-units = 1
 strip = true
 panic = "abort"
 
-[build-dependencies]
+[target.'cfg(windows)'.build-dependencies]
 winres = "0.1.12"
