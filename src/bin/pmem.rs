@@ -22,6 +22,7 @@ fn main() {
         "link" => cmd_link(rest),
         "recall" => cmd_recall(rest),
         "forget" | "delete" | "rm" | "remove" => cmd_forget(rest),
+        "skill" => cmd_skill(rest),
         "global" => cmd_global(rest),
         "stats" => cmd_stats(rest),
         "bench" => cmd_bench(rest),
@@ -38,13 +39,14 @@ fn main() {
 fn print_usage() {
     println!(
         "\
-Pyintel Mem (`pmem`) v0.1.2 — Sub-Millisecond Binary Vector & Temporal Graph Memory
+Pyintel Mem (`pmem`) v0.1.4 — Sub-Millisecond Binary Vector & Temporal Graph Memory
 Magic: 0x50 0x4D ('PM') | Quantization: SQ8 + BQ1 | Hybrid: Vector + BM25 + Graph + Decay
 
 USAGE:
   pmem recall [<file.pmem>] \"<query>\" [--top-k 5] [--ns <namespace>] [--tag <tag>] [--json]
   pmem forget [<file.pmem>] <id | \"query\"> [--json]
   pmem delete [<file.pmem>] <id | \"query\"> [--json]
+  pmem skill  [show] | install [--global]
   pmem global \"<query>\" [--top-k 5] [--ns <namespace>] [--tag <tag>] [--json]
   pmem global list | scan [<dir>] | add <file.pmem> | prune
   pmem store  [<file.pmem>] \"<fact>\" [--ns <namespace>] [--tags a,b] [--importance 1.0] [--pin]
@@ -384,6 +386,65 @@ fn cmd_forget(args: &[String]) -> Result<(), String> {
         );
     }
     Ok(())
+}
+
+const SKILL_MD: &str = include_str!("../../skills/pyintel-mem/SKILL.md");
+
+fn cmd_skill(args: &[String]) -> Result<(), String> {
+    if args.is_empty() {
+        print!("{}", SKILL_MD);
+        return Ok(());
+    }
+
+    match args[0].as_str() {
+        "install" => {
+            let is_global = args.iter().any(|a| a == "--global" || a == "-g");
+            let target_dir = if is_global {
+                let home = env::var("USERPROFILE")
+                    .or_else(|_| env::var("HOME"))
+                    .map_err(|_| "Could not determine user home directory")?;
+                PathBuf::from(home)
+                    .join(".gemini")
+                    .join("config")
+                    .join("skills")
+                    .join("pyintel-mem")
+            } else {
+                let curr = env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+                curr.join(".agents").join("skills").join("pyintel-mem")
+            };
+
+            std::fs::create_dir_all(&target_dir).map_err(|e| {
+                format!(
+                    "Failed to create skill directory '{}': {}",
+                    target_dir.display(),
+                    e
+                )
+            })?;
+            let skill_file = target_dir.join("SKILL.md");
+            std::fs::write(&skill_file, SKILL_MD).map_err(|e| {
+                format!(
+                    "Failed to write SKILL.md to '{}': {}",
+                    skill_file.display(),
+                    e
+                )
+            })?;
+
+            println!("[Pyintel-Mem] Successfully installed Agent Skill to:");
+            println!("  -> {}", skill_file.display());
+            println!(
+                "AI agents (Antigravity, Claude Code, Cursor, Windsurf) in this workspace will now automatically discover pyintel-mem for memory storage & causal reasoning."
+            );
+            Ok(())
+        }
+        "show" | "cat" => {
+            print!("{}", SKILL_MD);
+            Ok(())
+        }
+        _ => Err(format!(
+            "Unknown skill command '{}'. Usage: pmem skill [install [--global] | show]",
+            args[0]
+        )),
+    }
 }
 
 fn cmd_link(args: &[String]) -> Result<(), String> {
