@@ -15,30 +15,9 @@ permissions:
   contents: write
 
 jobs:
-  build:
-    name: Build (${{ matrix.target }})
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: windows-latest
-            target: x86_64-pc-windows-msvc
-            bin_name: pmem.exe
-            asset_name: pmem-windows-x86_64.exe
-          - os: ubuntu-latest
-            target: x86_64-unknown-linux-gnu
-            bin_name: pmem
-            asset_name: pmem-linux-x86_64
-          - os: macos-latest
-            target: aarch64-apple-darwin
-            bin_name: pmem
-            asset_name: pmem-macos-aarch64
-          - os: macos-13
-            target: x86_64-apple-darwin
-            bin_name: pmem
-            asset_name: pmem-macos-x86_64
-
+  build-windows:
+    name: Build (Windows x86_64)
+    runs-on: windows-latest
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -46,14 +25,12 @@ jobs:
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
         with:
-          targets: ${{ matrix.target }}
+          targets: x86_64-pc-windows-msvc
 
       - name: Build Release Binary
-        run: cargo build --release --target ${{ matrix.target }}
+        run: cargo build --release --target x86_64-pc-windows-msvc
 
-      # Code-sign Windows binary with Pyintel Authenticode Certificate
-      - name: Sign Windows Binary
-        if: matrix.os == 'windows-latest'
+      - name: Sign Windows Binary with Pyintel Certificate
         shell: pwsh
         run: |
           $cert = New-SelfSignedCertificate -Type CodeSigningCert `
@@ -61,57 +38,105 @@ jobs:
             -CertStoreLocation "Cert:\CurrentUser\My" `
             -NotAfter (Get-Date).AddYears(5)
           
-          # Sign binary
-          Set-AuthenticodeSignature -Certificate $cert -FilePath "target/${{ matrix.target }}/release/${{ matrix.bin_name }}"
-          Get-AuthenticodeSignature "target/${{ matrix.target }}/release/${{ matrix.bin_name }}"
+          # Sign binary with Authenticode
+          Set-AuthenticodeSignature -Certificate $cert -FilePath "target/x86_64-pc-windows-msvc/release/pmem.exe"
+          Get-AuthenticodeSignature "target/x86_64-pc-windows-msvc/release/pmem.exe"
           
-          # Copy to release asset name
-          Copy-Item "target/${{ matrix.target }}/release/${{ matrix.bin_name }}" "${{ matrix.asset_name }}"
+          # Copy to release asset
+          Copy-Item "target/x86_64-pc-windows-msvc/release/pmem.exe" "pmem-windows-x86_64.exe"
 
-      # Ad-hoc codesign for macOS so Gatekeeper allows execution
-      - name: Sign macOS Binary
-        if: runner.os == 'macOS'
-        run: |
-          codesign -s - --force "target/${{ matrix.target }}/release/${{ matrix.bin_name }}"
-          cp "target/${{ matrix.target }}/release/${{ matrix.bin_name }}" "${{ matrix.asset_name }}"
-
-      # Copy Linux binary
-      - name: Stage Linux Binary
-        if: runner.os == 'Linux'
-        run: |
-          cp "target/${{ matrix.target }}/release/${{ matrix.bin_name }}" "${{ matrix.asset_name }}"
-
-      - name: Upload Build Artifact
+      - name: Upload Windows Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.asset_name }}
-          path: ${{ matrix.asset_name }}
-          if-no-files-found: error
+          name: windows-artifact
+          path: pmem-windows-x86_64.exe
 
-  publish:
-    name: Publish Release & Checksums
-    needs: [build]
+  build-linux:
+    name: Build (Linux x86_64)
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Download all build artifacts
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-gnu
+
+      - name: Build Release Binary
+        run: |
+          cargo build --release --target x86_64-unknown-linux-gnu
+          cp target/x86_64-unknown-linux-gnu/release/pmem pmem-linux-x86_64
+          chmod +x pmem-linux-x86_64
+
+      - name: Upload Linux Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-artifact
+          path: pmem-linux-x86_64
+
+  build-macos:
+    name: Build (macOS Universal + Apple Silicon + Intel)
+    runs-on: macos-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+
+      - name: Build Apple Silicon (ARM64)
+        run: cargo build --release --target aarch64-apple-darwin
+
+      - name: Build Intel Mac (x86_64)
+        run: cargo build --release --target x86_64-apple-darwin
+
+      - name: Package & Create Universal Binary
+        run: |
+          cp target/aarch64-apple-darwin/release/pmem pmem-macos-aarch64
+          cp target/x86_64-apple-darwin/release/pmem pmem-macos-x86_64
+          lipo -create -output pmem-macos-universal pmem-macos-aarch64 pmem-macos-x86_64
+          
+          # Ad-hoc sign binaries for Gatekeeper
+          codesign -s - --force pmem-macos-aarch64
+          codesign -s - --force pmem-macos-x86_64
+          codesign -s - --force pmem-macos-universal
+          
+          chmod +x pmem-macos-*
+
+      - name: Upload macOS Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-artifacts
+          path: |
+            pmem-macos-aarch64
+            pmem-macos-x86_64
+            pmem-macos-universal
+
+  publish:
+    name: Publish GitHub Release
+    needs: [build-windows, build-linux, build-macos]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Download all artifacts
         uses: actions/download-artifact@v4
         with:
-          path: release-artifacts
+          path: release-assets
           merge-multiple: true
 
-      - name: Compute SHA-256 Checksums
+      - name: Compute Checksums & Stage Assets
         run: |
-          cd release-artifacts
+          cd release-assets
           sha256sum pmem-* > SHA256SUMS.txt
           cat SHA256SUMS.txt
-
-      - name: Copy Public Pyintel Certificate
-        run: |
+          cd ..
           if [ -f pyintel-code-signing.cer ]; then
-            cp pyintel-code-signing.cer release-artifacts/
+            cp pyintel-code-signing.cer release-assets/
           fi
 
       - name: Determine Release Tag
@@ -130,5 +155,5 @@ jobs:
           name: "Pyintel Mem (${{ steps.release_tag.outputs.tag }}) — Multi-Platform Release"
           draft: false
           prerelease: false
-          files: release-artifacts/*
+          files: release-assets/*
           generate_release_notes: true
