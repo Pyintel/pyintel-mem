@@ -106,3 +106,15 @@ pmem global "what is the autoVLA ADE scre?"
 ```
 Exposes `mem_store`, `mem_recall`, `mem_link`, `mem_forget` (or `mem_delete`), and `mem_stats` over JSON-RPC 2.0 stdio.
 
+### 3. Harvest Active Chat Memory into `.pmem` (Atomic Chunker)
+To migrate an active coding session or chatbot conversation into persistent `.pmem` storage without creating large monolithic text dumps, paste the **Agent Memory Harvester Prompt** ([`https://pyintel.cc/pmem-harvest.prompt`](https://pyintel.cc/pmem-harvest.prompt)) into Cursor, Antigravity, Claude, or ChatGPT:
+```powershell
+# Or pipe directly in CLI
+irm https://pyintel.cc/pmem-harvest.prompt | claude -p
+```
+The agent will automatically:
+1. Deconstruct the entire conversation into **atomic 1–2 sentence facts** (20–50 words each).
+2. Classify facts into namespaces (`architecture`, `config`, `auth`, `preference`, `decision`).
+3. Pin non-negotiable rules against Ebbinghaus decay.
+4. Link `SUPERSEDES`, `CAUSES`, and `DEPENDS_ON` edges across the knowledge graph.
+
