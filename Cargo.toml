@@ -1,0 +1,24 @@
+[package]
+name = "pyintel-mem"
+version = "0.1.0"
+edition = "2021"
+authors = ["Ritesh Raj Arul Selvan <riteshrajas@pyintel.cc>"]
+description = "Sub-millisecond single-file binary vector (SQ8/BQ1 HNSW), BM25 lexical, and temporal knowledge graph memory for local AI agents (.pmem)"
+license = "MIT"
+repository = "https://github.com/Pyintel/pyintel-mem"
+keywords = ["vector-database", "hnsw", "agent-memory", "mmap", "knowledge-graph"]
+categories = ["database-implementations", "science", "algorithms"]
+
+[lib]
+name = "pyintel_mem"
+path = "src/lib.rs"
+
+[[bin]]
+name = "pmem"
+path = "src/bin/pmem.rs"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = true

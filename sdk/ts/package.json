@@ -1,0 +1,17 @@
+{
+  "name": "@pyintel/mem",
+  "version": "0.1.0",
+  "description": "Zero-copy TypeScript SDK & binary header decoder for Pyintel Mem (.pmem)",
+  "type": "module",
+  "main": "./src/index.ts",
+  "license": "MIT",
+  "author": "Ritesh Raj Arul Selvan <riteshrajas@pyintel.cc>",
+  "keywords": [
+    "pyintel",
+    "pmem",
+    "vector-database",
+    "hnsw",
+    "agent-memory",
+    "mcp"
+  ]
+}

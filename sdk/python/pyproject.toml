@@ -1,0 +1,17 @@
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pyintel-mem"
+version = "0.1.0"
+description = "Sub-millisecond single-file binary vector & temporal graph memory for local AI agents (.pmem)"
+readme = "../../README.md"
+license = { text = "MIT" }
+authors = [{ name = "Ritesh Raj Arul Selvan", email = "riteshrajas@pyintel.cc" }]
+requires-python = ">=3.10"
+dependencies = []
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["pyintel_mem*"]
