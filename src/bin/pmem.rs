@@ -21,6 +21,7 @@ fn main() {
         "store" => cmd_store(rest),
         "link" => cmd_link(rest),
         "recall" => cmd_recall(rest),
+        "global" => cmd_global(rest),
         "stats" => cmd_stats(rest),
         "bench" => cmd_bench(rest),
         "mcp" => cmd_mcp(rest),
@@ -41,6 +42,8 @@ Magic: 0x50 0x4D ('PM') | Quantization: SQ8 + BQ1 | Hybrid: Vector + BM25 + Grap
 
 USAGE:
   pmem recall [<file.pmem>] \"<query>\" [--top-k 5] [--ns <namespace>] [--tag <tag>] [--json]
+  pmem global \"<query>\" [--top-k 5] [--ns <namespace>] [--tag <tag>] [--json]
+  pmem global list | scan [<dir>] | add <file.pmem> | prune
   pmem store  [<file.pmem>] \"<fact>\" [--ns <namespace>] [--tags a,b] [--importance 1.0] [--pin]
   pmem link   [<file.pmem>] --src <id> --dst <id> [--kind CAUSES|SUPERSEDES|RELATES_TO|PART_OF|DEPENDS_ON] [--weight 0.9]
   pmem stats  [<file.pmem>] [--json]
@@ -69,6 +72,107 @@ fn default_db_path() -> PathBuf {
     PathBuf::from("workspace.pmem")
 }
 
+fn global_registry_path() -> PathBuf {
+    if let Ok(reg_env) = env::var("PMEM_REGISTRY") {
+        if !reg_env.trim().is_empty() {
+            return PathBuf::from(reg_env);
+        }
+    }
+    let primary_dir = Path::new(r"P:\Projects\Pyintel\Pyintel\pyintel-mem");
+    if primary_dir.exists() {
+        return primary_dir.join("pmem_registry.txt");
+    }
+    if let Ok(home) = env::var("USERPROFILE").or_else(|_| env::var("HOME")) {
+        let dir = PathBuf::from(home).join(".pmem");
+        let _ = std::fs::create_dir_all(&dir);
+        return dir.join("pmem_registry.txt");
+    }
+    PathBuf::from("pmem_registry.txt")
+}
+
+fn normalize_store_path(path: &Path) -> String {
+    let abs = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        env::current_dir()
+            .unwrap_or_else(|_| PathBuf::from("."))
+            .join(path)
+    };
+    let s = abs
+        .canonicalize()
+        .unwrap_or(abs)
+        .display()
+        .to_string();
+    // Strip Windows extended-length prefix `\\?\` for clean display & comparison
+    s.strip_prefix(r"\\?\").unwrap_or(&s).to_string()
+}
+
+/// Automatically records a `.pmem` store path into the global registry so `pmem global` tracks it.
+fn register_store(path: &Path) {
+    let file_name = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    if file_name.contains("pyintel_mem_bench") || file_name.starts_with("tmp") {
+        return;
+    }
+    let norm = normalize_store_path(path);
+    let reg_path = global_registry_path();
+    let mut existing = load_registered_stores();
+    if !existing
+        .iter()
+        .any(|p| p.to_string_lossy().eq_ignore_ascii_case(&norm))
+    {
+        existing.push(PathBuf::from(&norm));
+        save_registered_stores(&reg_path, &existing);
+    }
+}
+
+fn load_registered_stores() -> Vec<PathBuf> {
+    let reg_path = global_registry_path();
+    let mut stores: Vec<PathBuf> = Vec::new();
+    if let Ok(content) = std::fs::read_to_string(&reg_path) {
+        for line in content.lines() {
+            let trimmed = line.trim();
+            if !trimmed.is_empty() && !trimmed.starts_with('#') {
+                let pb = PathBuf::from(trimmed);
+                if !stores
+                    .iter()
+                    .any(|p| p.to_string_lossy().eq_ignore_ascii_case(trimmed))
+                {
+                    stores.push(pb);
+                }
+            }
+        }
+    }
+    // Always ensure default workspace.pmem is included if it exists
+    let def = default_db_path();
+    if def.exists() {
+        let norm = normalize_store_path(&def);
+        if !stores
+            .iter()
+            .any(|p| p.to_string_lossy().eq_ignore_ascii_case(&norm))
+        {
+            stores.push(PathBuf::from(&norm));
+            save_registered_stores(&reg_path, &stores);
+        }
+    }
+    stores
+}
+
+fn save_registered_stores(reg_path: &Path, stores: &[PathBuf]) {
+    if let Some(parent) = reg_path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let mut body = String::new();
+    for s in stores {
+        body.push_str(&s.display().to_string());
+        body.push('\n');
+    }
+    let _ = std::fs::write(reg_path, body);
+}
+
 /// If `args[0]` looks like an explicit `.pmem` path, consumes it; otherwise uses `default_db_path()`.
 fn resolve_db_and_args(args: &[String]) -> (PathBuf, &[String]) {
     if let Some(first) = args.first() {
@@ -82,7 +186,9 @@ fn resolve_db_and_args(args: &[String]) -> (PathBuf, &[String]) {
 
 fn load_or_create(path: &Path, default_dim: usize, default_hl: f32) -> Result<PyintelMem, String> {
     if path.exists() {
-        PyintelMem::load_mmap(path)
+        let mem = PyintelMem::load_mmap(path)?;
+        register_store(path);
+        Ok(mem)
     } else {
         Ok(PyintelMem::new(default_dim, default_hl))
     }
@@ -110,6 +216,7 @@ fn cmd_init(args: &[String]) -> Result<(), String> {
 
     let mem = PyintelMem::new(dim, half_life);
     mem.save(&path).map_err(|e| e.to_string())?;
+    register_store(&path);
     println!(
         "Initialized .pmem store at '{}' (dim={}, half_life={}s, header=64B)",
         path.display(),
@@ -180,6 +287,7 @@ fn cmd_store(args: &[String]) -> Result<(), String> {
     let mut mem = load_or_create(&path, 128, 604_800.0)?;
     let id = mem.store(custom_id, &ns, &text, tags, None, importance, pin, None);
     mem.save(&path).map_err(|e| e.to_string())?;
+    register_store(&path);
     println!(
         "{{\"status\":\"ok\",\"id\":{},\"namespace\":\"{}\",\"nodes\":{}}}",
         id,
@@ -231,6 +339,7 @@ fn cmd_link(args: &[String]) -> Result<(), String> {
     let mut mem = PyintelMem::load_mmap(&path)?;
     mem.link(s, d, kind, weight);
     mem.save(&path).map_err(|e| e.to_string())?;
+    register_store(&path);
     println!(
         "{{\"status\":\"ok\",\"src\":{},\"dst\":{},\"kind\":\"{}\",\"weight\":{:.2},\"edges\":{}}}",
         s,
@@ -282,6 +391,7 @@ fn cmd_recall(args: &[String]) -> Result<(), String> {
     }
 
     let mut mem = PyintelMem::load_mmap(&path)?;
+    register_store(&path);
     let mmap_native = mem.last_mmap_native;
     let report = mem.recall(query, opts.clone());
     if opts.reinforce_on_recall && !report.hits.is_empty() {
@@ -321,10 +431,271 @@ fn cmd_recall(args: &[String]) -> Result<(), String> {
     Ok(())
 }
 
+fn scan_dir_for_pmem(dir: &Path, found: &mut Vec<PathBuf>, depth: usize) {
+    if depth > 6 {
+        return;
+    }
+    let entries = match std::fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(_) => return,
+    };
+    for entry in entries.flatten() {
+        let p = entry.path();
+        if p.is_dir() {
+            let name = p.file_name().and_then(|n| n.to_str()).unwrap_or_default();
+            if name.starts_with('.') || name == "target" || name == "node_modules" {
+                continue;
+            }
+            scan_dir_for_pmem(&p, found, depth + 1);
+        } else if let Some(ext) = p.extension().and_then(|e| e.to_str()) {
+            if ext.eq_ignore_ascii_case("pmem") {
+                found.push(p);
+            }
+        }
+    }
+}
+
+/// Federated global command: searches or manages every `.pmem` store tracked in the global registry.
+fn cmd_global(args: &[String]) -> Result<(), String> {
+    if args.is_empty() {
+        return Err(
+            "Usage:\n  pmem global \"<query>\" [--top-k 5] [--ns <namespace>] [--tag <tag>] [--json]\n  pmem global list\n  pmem global scan [<dir>]\n  pmem global add <file.pmem>\n  pmem global prune"
+                .into(),
+        );
+    }
+
+    match args[0].as_str() {
+        "list" | "--list" | "status" | "stats" => {
+            let stores = load_registered_stores();
+            println!(
+                "=== Pyintel Mem Global Registry ({} tracked stores | registry: {}) ===",
+                stores.len(),
+                global_registry_path().display()
+            );
+            for (idx, sp) in stores.iter().enumerate() {
+                if sp.exists() {
+                    let sz = std::fs::metadata(sp).map(|m| m.len()).unwrap_or(0);
+                    match PyintelMem::load_mmap(sp) {
+                        Ok(mem) => {
+                            let active = mem.records.iter().filter(|r| !r.is_tombstoned()).count();
+                            println!(
+                                "  [{}] {} ({} B | active_nodes={} | edges={} | dim={})",
+                                idx + 1,
+                                sp.display(),
+                                sz,
+                                active,
+                                mem.edges().len(),
+                                mem.dim
+                            );
+                        }
+                        Err(e) => {
+                            println!("  [{}] {} (ERROR: {})", idx + 1, sp.display(), e);
+                        }
+                    }
+                } else {
+                    println!("  [{}] {} (MISSING on disk — run `pmem global prune`)", idx + 1, sp.display());
+                }
+            }
+            return Ok(());
+        }
+        "add" | "register" => {
+            if args.len() < 2 {
+                return Err("Usage: pmem global add <file.pmem>".into());
+            }
+            let p = PathBuf::from(&args[1]);
+            if !p.exists() {
+                return Err(format!("Store '{}' does not exist", p.display()));
+            }
+            register_store(&p);
+            println!("Registered '{}' in global pmem registry.", normalize_store_path(&p));
+            return Ok(());
+        }
+        "scan" => {
+            let root = if args.len() >= 2 {
+                PathBuf::from(&args[1])
+            } else {
+                env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
+            };
+            let mut found = Vec::new();
+            scan_dir_for_pmem(&root, &mut found, 0);
+            for f in &found {
+                register_store(f);
+            }
+            let total = load_registered_stores().len();
+            println!(
+                "Scanned '{}' -> discovered {} .pmem files ({} total in global registry).",
+                root.display(),
+                found.len(),
+                total
+            );
+            return Ok(());
+        }
+        "prune" => {
+            let reg_path = global_registry_path();
+            let before = load_registered_stores();
+            let kept: Vec<PathBuf> = before.into_iter().filter(|p| p.exists()).collect();
+            save_registered_stores(&reg_path, &kept);
+            println!("Pruned global registry -> {} active .pmem stores remain.", kept.len());
+            return Ok(());
+        }
+        _ => {}
+    }
+
+    // Allow either `pmem global "<query>"` or `pmem global recall "<query>"`
+    let rem = if args[0] == "recall" || args[0] == "search" {
+        if args.len() < 2 {
+            return Err("Usage: pmem global \"<query>\" [--top-k 5] [--ns <ns>] [--tag <tag>] [--json]".into());
+        }
+        &args[1..]
+    } else {
+        args
+    };
+
+    let query = &rem[0];
+    let mut opts = QueryOptions {
+        reinforce_on_recall: false,
+        ..Default::default()
+    };
+    let mut as_json = false;
+
+    let mut i = 1;
+    while i < rem.len() {
+        match rem[i].as_str() {
+            "--top-k" | "-k" if i + 1 < rem.len() => {
+                opts.top_k = rem[i + 1].parse().map_err(|_| "Invalid --top-k")?;
+                i += 2;
+            }
+            "--ns" | "--namespace" if i + 1 < rem.len() => {
+                opts.namespace = Some(rem[i + 1].clone());
+                i += 2;
+            }
+            "--tag" if i + 1 < rem.len() => {
+                opts.required_tag = Some(rem[i + 1].clone());
+                i += 2;
+            }
+            "--include-superseded" => {
+                opts.include_superseded = true;
+                i += 1;
+            }
+            "--reinforce" => {
+                opts.reinforce_on_recall = true;
+                i += 1;
+            }
+            "--json" => {
+                as_json = true;
+                i += 1;
+            }
+            _ => i += 1,
+        }
+    }
+
+    let stores = load_registered_stores();
+    let t0 = Instant::now();
+    let mut global_hits: Vec<(String, String, pyintel_mem::ScoredMemory)> = Vec::new();
+    let mut stores_searched = 0usize;
+    let mut total_nodes = 0usize;
+    let mut total_candidates = 0usize;
+    let mut sum_query_us = 0.0f64;
+
+    for sp in &stores {
+        if !sp.exists() {
+            continue;
+        }
+        if let Ok(mut mem) = PyintelMem::load_mmap(sp) {
+            stores_searched += 1;
+            let rep = mem.recall(query, opts.clone());
+            sum_query_us += rep.latency_micros;
+            total_nodes += rep.total_active_nodes;
+            total_candidates += rep.candidate_count;
+            if opts.reinforce_on_recall && !rep.hits.is_empty() {
+                let _ = mem.save(sp);
+            }
+            let short_name = sp
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("store.pmem")
+                .to_string();
+            let full_path = sp.display().to_string();
+            for h in rep.hits {
+                global_hits.push((short_name.clone(), full_path.clone(), h));
+            }
+        }
+    }
+
+    global_hits.sort_by(|a, b| {
+        b.2.final_score
+            .partial_cmp(&a.2.final_score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    global_hits.truncate(opts.top_k.max(1));
+    let elapsed_us = t0.elapsed().as_secs_f64() * 1_000_000.0;
+
+    if as_json {
+        let mut items = Vec::with_capacity(global_hits.len());
+        for (short_store, full_store, h) in &global_hits {
+            let tags_str: Vec<String> = h
+                .tags
+                .iter()
+                .map(|t| format!("\"{}\"", escape_json(t)))
+                .collect();
+            items.push(format!(
+                "{{\"store\":\"{}\",\"store_path\":\"{}\",\"id\":{},\"namespace\":\"{}\",\"content\":\"{}\",\"tags\":[{}],\"final_score\":{:.4},\"vector_score\":{:.4},\"bm25_score\":{:.4},\"graph_boost\":{:.4},\"temporal_decay\":{:.4},\"importance\":{:.2}}}",
+                escape_json(short_store),
+                escape_json(full_store),
+                h.id,
+                escape_json(&h.namespace),
+                escape_json(&h.content),
+                tags_str.join(","),
+                h.final_score,
+                h.vector_score,
+                h.bm25_score,
+                h.graph_boost,
+                h.temporal_decay,
+                h.importance
+            ));
+        }
+        println!(
+            "{{\"stores_searched\":{},\"total_active_nodes\":{},\"candidate_count\":{},\"query_micros\":{:.2},\"total_mmap_micros\":{:.2},\"hits\":[{}]}}",
+            stores_searched,
+            total_nodes,
+            total_candidates,
+            sum_query_us,
+            elapsed_us,
+            items.join(",")
+        );
+    } else {
+        println!(
+            "=== Pyintel Mem Global Recall (query: {:.1} µs | total mmap: {:.1} µs | stores: {} | candidates: {}/{}) ===",
+            sum_query_us, elapsed_us, stores_searched, total_candidates, total_nodes
+        );
+        for (rank, (short_store, _full_store, h)) in global_hits.iter().enumerate() {
+            println!(
+                "  #{:<2} [{} :: {} #{}] (score={:.4} | vec={:.3} bm25={:.3} graph={:.3} decay={:.3} imp={:.1})",
+                rank + 1,
+                short_store,
+                h.namespace,
+                h.id,
+                h.final_score,
+                h.vector_score,
+                h.bm25_score,
+                h.graph_boost,
+                h.temporal_decay,
+                h.importance
+            );
+            println!("      {}", h.content);
+            if !h.tags.is_empty() {
+                println!("      tags: {:?}", h.tags);
+            }
+        }
+    }
+    Ok(())
+}
+
 fn cmd_stats(args: &[String]) -> Result<(), String> {
     let (path, _rem) = resolve_db_and_args(args);
     let file_size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
     let mem = PyintelMem::load_mmap(&path)?;
+    register_store(&path);
     let active = mem.records.iter().filter(|r| !r.is_tombstoned()).count();
 
     println!(

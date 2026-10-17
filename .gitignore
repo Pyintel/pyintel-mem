@@ -1,6 +1,7 @@
 /target/
 **/*.rs.bk
 *.pmem
+pmem_registry.txt
 __pycache__/
 *.pyc
 node_modules/
