@@ -318,4 +318,73 @@ impl HnswIndex {
         filtered.truncate(top_k);
         (filtered, "hnsw_in_graph")
     }
+
+    /// Serializes all HNSW multi-layer adjacency lists into a compact binary slab
+    /// so `load_mmap` can restore the graph in O(N) without rebuilding HNSW.
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let mut out = Vec::with_capacity(16 + self.nodes.len() * 32);
+        out.extend_from_slice(&(self.max_layer as u32).to_le_bytes());
+        out.extend_from_slice(&self.entry_slot.unwrap_or(0xFFFF_FFFF).to_le_bytes());
+        out.extend_from_slice(&(self.nodes.len() as u32).to_le_bytes());
+        for node in &self.nodes {
+            out.push(node.layers.len() as u8);
+            for layer in &node.layers {
+                out.push(layer.len() as u8);
+                for &nb in layer {
+                    out.extend_from_slice(&nb.to_le_bytes());
+                }
+            }
+        }
+        out
+    }
+
+    /// Restores the HNSW multi-layer adjacency lists from a serialized binary slice in O(N).
+    pub fn from_bytes(bytes: &[u8]) -> Option<(Self, usize)> {
+        if bytes.len() < 12 {
+            return None;
+        }
+        let max_layer = u32::from_le_bytes(bytes[0..4].try_into().ok()?) as usize;
+        let raw_entry = u32::from_le_bytes(bytes[4..8].try_into().ok()?);
+        let node_count = u32::from_le_bytes(bytes[8..12].try_into().ok()?) as usize;
+        let entry_slot = if raw_entry == 0xFFFF_FFFF {
+            None
+        } else {
+            Some(raw_entry)
+        };
+
+        let mut pos = 12usize;
+        let mut nodes = Vec::with_capacity(node_count);
+        for _ in 0..node_count {
+            if pos >= bytes.len() {
+                return None;
+            }
+            let num_layers = bytes[pos] as usize;
+            pos += 1;
+            let mut layers = Vec::with_capacity(num_layers);
+            for _ in 0..num_layers {
+                if pos >= bytes.len() {
+                    return None;
+                }
+                let deg = bytes[pos] as usize;
+                pos += 1;
+                if pos + deg * 4 > bytes.len() {
+                    return None;
+                }
+                let mut list = Vec::with_capacity(deg);
+                for _ in 0..deg {
+                    let nb = u32::from_le_bytes(bytes[pos..pos + 4].try_into().ok()?);
+                    pos += 4;
+                    list.push(nb);
+                }
+                layers.push(list);
+            }
+            nodes.push(HnswNode { layers });
+        }
+
+        let mut idx = Self::default();
+        idx.max_layer = max_layer;
+        idx.entry_slot = entry_slot;
+        idx.nodes = nodes;
+        Some((idx, pos))
+    }
 }

@@ -18,6 +18,7 @@ pub const FLAG_SQ8: u32 = 1 << 0;
 pub const FLAG_BQ1: u32 = 1 << 1;
 pub const FLAG_BM25: u32 = 1 << 2;
 pub const FLAG_GRAPH: u32 = 1 << 3;
+pub const FLAG_HNSW_CSR: u32 = 1 << 4;
 
 pub const NODE_FLAG_TOMBSTONE: u32 = 1 << 0;
 pub const NODE_FLAG_PINNED: u32 = 1 << 1;

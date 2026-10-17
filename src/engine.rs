@@ -10,7 +10,8 @@
 use crate::bm25::Bm25Index;
 use crate::format::{
     write_atomic, MmapView, PmemHeader, EDGE_RECORD_SIZE, FLAG_BM25, FLAG_BQ1, FLAG_GRAPH,
-    FLAG_SQ8, HEADER_SIZE, NODE_FLAG_PINNED, NODE_FLAG_TOMBSTONE, NODE_RECORD_SIZE, PMEM_VERSION,
+    FLAG_HNSW_CSR, FLAG_SQ8, HEADER_SIZE, NODE_FLAG_PINNED, NODE_FLAG_TOMBSTONE, NODE_RECORD_SIZE,
+    PMEM_VERSION,
 };
 use crate::graph::{EdgeKind, GraphEdge, TemporalGraph};
 use crate::hnsw::HnswIndex;
@@ -527,12 +528,13 @@ impl PyintelMem {
             payload_spans.push((start, len));
         }
 
-        let total_size = (arena_offset as usize) + arena.len();
+        let hnsw_bytes = self.hnsw.to_bytes();
+        let total_size = (arena_offset as usize) + arena.len() + hnsw_bytes.len();
         let mut buf = vec![0u8; total_size];
 
         let header = PmemHeader {
             version: PMEM_VERSION,
-            flags: FLAG_SQ8 | FLAG_BQ1 | FLAG_BM25 | FLAG_GRAPH,
+            flags: FLAG_SQ8 | FLAG_BQ1 | FLAG_BM25 | FLAG_GRAPH | FLAG_HNSW_CSR,
             dim,
             node_count,
             edge_count,
@@ -588,9 +590,11 @@ impl PyintelMem {
             buf[off + 20] = edge.kind as u8;
         }
 
-        // Write UTF-8 Payload Arena
+        // Write UTF-8 Payload Arena + HNSW CSR Adjacency Slab
         let a_off = arena_offset as usize;
         buf[a_off..a_off + arena.len()].copy_from_slice(&arena);
+        let h_off = a_off + arena.len();
+        buf[h_off..h_off + hnsw_bytes.len()].copy_from_slice(&hnsw_bytes);
 
         buf
     }
@@ -626,6 +630,8 @@ impl PyintelMem {
         }
 
         let mut engine = Self::new(dim, header.half_life_secs);
+        let has_hnsw_csr = (header.flags & FLAG_HNSW_CSR) != 0;
+        let mut max_payload_end = 0usize;
 
         for i in 0..node_count {
             let n_off = (header.nodes_offset as usize) + i * NODE_RECORD_SIZE;
@@ -643,8 +649,12 @@ impl PyintelMem {
                 u32::from_le_bytes(bytes[n_off + 36..n_off + 40].try_into().unwrap());
             let payload_offset =
                 u32::from_le_bytes(bytes[n_off + 40..n_off + 44].try_into().unwrap()) as usize;
-            let _payload_len =
+            let payload_len =
                 u32::from_le_bytes(bytes[n_off + 44..n_off + 48].try_into().unwrap()) as usize;
+
+            if payload_offset + payload_len > max_payload_end {
+                max_payload_end = payload_offset + payload_len;
+            }
 
             let p_base = arena_offset + payload_offset;
             let ns_len = u16::from_le_bytes(bytes[p_base..p_base + 2].try_into().unwrap()) as usize;
@@ -710,8 +720,21 @@ impl PyintelMem {
             }
             engine.sq8_vectors.push(sq8);
             engine.bq1_vectors.push(bq1);
-            engine.hnsw.insert(slot, &engine.sq8_vectors);
+            if !has_hnsw_csr {
+                engine.hnsw.insert(slot, &engine.sq8_vectors);
+            }
             engine.bm25.insert(slot, &indexable);
+        }
+
+        if has_hnsw_csr {
+            let h_off = arena_offset + max_payload_end;
+            if let Some((restored_hnsw, _)) = HnswIndex::from_bytes(&bytes[h_off..]) {
+                engine.hnsw = restored_hnsw;
+            } else {
+                for slot in 0..(node_count as u32) {
+                    engine.hnsw.insert(slot, &engine.sq8_vectors);
+                }
+            }
         }
 
         // Decode Graph Edges

@@ -30,12 +30,12 @@ Measured on Windows (`x86_64-pc-windows-gnu`, `rustc 1.99.1 --release`, LTO enab
 | Metric | Measured Result |
 |---|---|
 | **Nodes & Graph Edges Indexed** | `2,500` nodes (`128-D`) + `833` directed graph edges |
-| **`.pmem` Single-File Size** | `775,412 bytes` (`757.24 KB` total — **`310.2 bytes/node`** including vectors, edges, and UTF-8 text) |
-| **Index Build Throughput** | `262.05 ms` total (`104.8 µs/node`) |
-| **`.pmem` Atomic Save Time** | `40.08 ms` |
-| **Native OS `mmap` Verified** | `true` (`MapViewOfFile` zero-copy virtual memory view + CRC-32 header verification) |
-| **Selective Filtered Query (`5%` selectivity)** | **`342.6 µs` (`0.34 ms`) p50** / `679.0 µs` p99 (`prefiltered_simd_sq8`, 100% filtered recall) |
-| **Broad Unfiltered Query (`2,500` nodes)** | **`863.2 µs` (`0.86 ms`) p50** / `1,197.0 µs` p99 (`hnsw_in_graph` + BM25 + 2-hop graph activation) |
+| **`.pmem` Single-File Size** | `1,116,252 bytes` (`1,090.09 KB` total — **`446.5 bytes/node`** including vectors, serialized HNSW layers, edges, and UTF-8 text) |
+| **Index Build Throughput** | `228.92 ms` total (`91.6 µs/node`) |
+| **`.pmem` Atomic Save Time** | `38.11 ms` |
+| **OS `mmap` Load + $O(N)$ HNSW Restore** | **`26.32 ms`** (`native_mmap = true`, `FLAG_HNSW_CSR` eliminates graph rebuild on load — **8.1x faster** than cold HNSW insertion) |
+| **Selective Filtered Query (`5%` selectivity)** | **`332.2 µs` (`0.33 ms`) p50** / `936.7 µs` p99 (`prefiltered_simd_sq8`, 100% filtered recall) |
+| **Broad Unfiltered Query (`2,500` nodes)** | **`611.5 µs` (`0.61 ms`) p50** / `1,297.7 µs` p99 (`hnsw_in_graph` + BM25 + 2-hop graph activation) |
 
 > **Note on Embeddings:** By default, when raw `f32` embedding vectors are not passed explicitly by the caller, `pyintel-mem` uses a fast deterministic CountSketch n-gram/bigram projection (`deterministic_text_embedding`) paired with Okapi BM25. For neural semantic embeddings, callers can pass dense `f32` vectors from `google/embeddinggemma-2` or any ONNX/local embedder directly to `PyintelMem::store()`.
 
