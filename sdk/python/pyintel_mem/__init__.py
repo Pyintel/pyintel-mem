@@ -140,6 +140,16 @@ class PyintelMemClient:
         res = subprocess.run(cmd, check=True, capture_output=True, text=True)
         return json.loads(res.stdout.strip())
 
+    def forget(self, id_or_query: int | str) -> Dict[str, Any]:
+        """Tombstones/deletes a memory by node ID or best-matching search query."""
+        cmd = [self.bin, "forget", str(self.db_path), str(id_or_query), "--json"]
+        res = subprocess.run(cmd, check=True, capture_output=True, text=True)
+        return json.loads(res.stdout.strip())
+
+    def delete(self, id_or_query: int | str) -> Dict[str, Any]:
+        """Alias for forget()."""
+        return self.forget(id_or_query)
+
     def stats(self) -> Dict[str, Any]:
         res = subprocess.run(
             [self.bin, "stats", str(self.db_path), "--json"],

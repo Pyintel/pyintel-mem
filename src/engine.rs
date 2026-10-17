@@ -278,10 +278,30 @@ impl PyintelMem {
     pub fn forget(&mut self, id: u64) -> bool {
         if let Some(&slot) = self.id_to_slot.get(&id) {
             self.records[slot as usize].flags |= NODE_FLAG_TOMBSTONE;
+            self.id_to_slot.remove(&id);
             true
         } else {
             false
         }
+    }
+
+    /// Finds the top matching memory for a query and marks it as tombstoned (soft-deleted).
+    pub fn forget_query(&mut self, query: &str) -> Option<(u64, String)> {
+        let rep = self.recall(
+            query,
+            QueryOptions {
+                top_k: 1,
+                ..Default::default()
+            },
+        );
+        if let Some(top) = rep.hits.first() {
+            let id = top.id;
+            let content = top.content.clone();
+            if self.forget(id) {
+                return Some((id, content));
+            }
+        }
+        None
     }
 
     /// Computes Ebbinghaus spaced-repetition retention in `[0.05, 1.0]`:

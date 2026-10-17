@@ -84,6 +84,10 @@ pmem link --src 1 --dst 2 --kind CAUSES --weight 0.95
 # Hybrid 4-signal recall (resilient to typos like 'scre' -> 'score')
 pmem recall "what is the autoVLA ADE scre?"
 
+# Delete / forget outdated memories by ID or natural query (tombstone flag 0x01)
+pmem forget 1
+pmem forget "outdated firewall rule"
+
 # Federated global search across EVERY tracked .pmem store on disk
 pmem global list
 pmem global "what is the autoVLA ADE scre?"
@@ -100,5 +104,5 @@ pmem global "what is the autoVLA ADE scre?"
   }
 }
 ```
-Exposes `mem_store`, `mem_recall`, `mem_link`, and `mem_stats` over JSON-RPC 2.0 stdio.
+Exposes `mem_store`, `mem_recall`, `mem_link`, `mem_forget` (or `mem_delete`), and `mem_stats` over JSON-RPC 2.0 stdio.
 

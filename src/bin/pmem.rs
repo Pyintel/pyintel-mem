@@ -21,6 +21,7 @@ fn main() {
         "store" => cmd_store(rest),
         "link" => cmd_link(rest),
         "recall" => cmd_recall(rest),
+        "forget" | "delete" | "rm" | "remove" => cmd_forget(rest),
         "global" => cmd_global(rest),
         "stats" => cmd_stats(rest),
         "bench" => cmd_bench(rest),
@@ -37,11 +38,13 @@ fn main() {
 fn print_usage() {
     println!(
         "\
-Pyintel Mem (`pmem`) v0.1.0 — Sub-Millisecond Binary Vector & Temporal Graph Memory
+Pyintel Mem (`pmem`) v0.1.2 — Sub-Millisecond Binary Vector & Temporal Graph Memory
 Magic: 0x50 0x4D ('PM') | Quantization: SQ8 + BQ1 | Hybrid: Vector + BM25 + Graph + Decay
 
 USAGE:
   pmem recall [<file.pmem>] \"<query>\" [--top-k 5] [--ns <namespace>] [--tag <tag>] [--json]
+  pmem forget [<file.pmem>] <id | \"query\"> [--json]
+  pmem delete [<file.pmem>] <id | \"query\"> [--json]
   pmem global \"<query>\" [--top-k 5] [--ns <namespace>] [--tag <tag>] [--json]
   pmem global list | scan [<dir>] | add <file.pmem> | prune
   pmem store  [<file.pmem>] \"<fact>\" [--ns <namespace>] [--tags a,b] [--importance 1.0] [--pin]
@@ -294,6 +297,92 @@ fn cmd_store(args: &[String]) -> Result<(), String> {
         escape_json(&ns),
         mem.records.len()
     );
+    Ok(())
+}
+
+fn cmd_forget(args: &[String]) -> Result<(), String> {
+    if args.is_empty() {
+        return Err("Usage: pmem forget [<file.pmem>] <id | \"query\"> [--json]".into());
+    }
+    let (path, rem) = resolve_db_and_args(args);
+    if rem.is_empty() {
+        return Err("Specify memory node ID or search query to forget. Usage: pmem forget <id | \"query\">".into());
+    }
+
+    let mut target_id: Option<u64> = None;
+    let mut target_query: Option<String> = None;
+    let mut as_json = false;
+
+    let mut i = 0;
+    while i < rem.len() {
+        match rem[i].as_str() {
+            "--id" if i + 1 < rem.len() => {
+                target_id = Some(rem[i + 1].parse().map_err(|_| "Invalid --id integer")?);
+                i += 2;
+            }
+            "--query" | "-q" if i + 1 < rem.len() => {
+                target_query = Some(rem[i + 1].clone());
+                i += 2;
+            }
+            "--json" => {
+                as_json = true;
+                i += 1;
+            }
+            s if target_id.is_none() && target_query.is_none() && !s.starts_with('-') => {
+                if let Ok(num) = s.parse::<u64>() {
+                    target_id = Some(num);
+                } else {
+                    target_query = Some(s.to_string());
+                }
+                i += 1;
+            }
+            _ => i += 1,
+        }
+    }
+
+    let mut mem = load_or_create(&path, 128, 604_800.0)?;
+
+    let (forgotten_id, content) = if let Some(id) = target_id {
+        let content = mem.records.iter().find(|r| r.id == id && !r.is_tombstoned()).map(|r| r.content.clone());
+        if mem.forget(id) {
+            (id, content.unwrap_or_default())
+        } else {
+            return Err(format!("Memory node #{} not found or already forgotten in '{}'.", id, path.display()));
+        }
+    } else if let Some(query) = target_query {
+        if let Some((id, text)) = mem.forget_query(&query) {
+            (id, text)
+        } else {
+            return Err(format!("No active memories matched query '{}' to forget.", query));
+        }
+    } else {
+        return Err("Specify node ID or search query to forget: `pmem forget <id | \"query\">`".into());
+    };
+
+    mem.save(&path).map_err(|e| e.to_string())?;
+    let active = mem.records.iter().filter(|r| !r.is_tombstoned()).count();
+
+    if as_json {
+        println!(
+            "{{\"status\":\"forgotten\",\"id\":{},\"active_nodes\":{},\"content\":\"{}\",\"file\":\"{}\"}}",
+            forgotten_id,
+            active,
+            escape_json(&content),
+            path.display()
+        );
+    } else {
+        let preview = if content.chars().count() > 60 {
+            format!("{}...", content.chars().take(57).collect::<String>())
+        } else {
+            content
+        };
+        println!(
+            "[Pyintel-Mem] Forgot memory node #{}: \"{}\". Active memories: {}.",
+            forgotten_id,
+            preview,
+            active
+        );
+    }
     Ok(())
 }
 
@@ -876,10 +965,12 @@ fn cmd_mcp(args: &[String]) -> Result<(), String> {
                 req_id
             ),
             "tools/list" => format!(
-                "{{\"jsonrpc\":\"2.0\",\"id\":{},\"result\":{{\"tools\":[{}, {}, {}, {}]}}}}",
+                "{{\"jsonrpc\":\"2.0\",\"id\":{},\"result\":{{\"tools\":[{}, {}, {}, {}, {}, {}]}}}}",
                 req_id,
                 r#"{"name":"mem_store","description":"Store a fact or episodic memory into the persistent .pmem binary vector & temporal graph store","inputSchema":{"type":"object","properties":{"content":{"type":"string"},"namespace":{"type":"string"},"tags":{"type":"string","description":"Comma-separated tags"},"importance":{"type":"number"}},"required":["content"]}}"#,
                 r#"{"name":"mem_recall","description":"Recall relevant memories using 4-signal hybrid scoring (SQ8/BQ1 vector + Okapi BM25 + 2-hop graph boost + Ebbinghaus temporal decay)","inputSchema":{"type":"object","properties":{"query":{"type":"string"},"namespace":{"type":"string"},"tag":{"type":"string"},"top_k":{"type":"integer"}},"required":["query"]}}"#,
+                r#"{"name":"mem_forget","description":"Delete or tombstone an outdated or unwanted memory by node ID or search query from the active .pmem store","inputSchema":{"type":"object","properties":{"id":{"type":"integer","description":"Memory node ID to forget"},"query":{"type":"string","description":"Search query to find and forget the top matching memory if ID is unknown"}}}}"#,
+                r#"{"name":"mem_delete","description":"Alias for mem_forget. Delete or tombstone an outdated or unwanted memory by node ID or search query","inputSchema":{"type":"object","properties":{"id":{"type":"integer","description":"Memory node ID to delete"},"query":{"type":"string","description":"Search query to find and delete the top matching memory if ID is unknown"}}}}"#,
                 r#"{"name":"mem_link","description":"Create a typed directed edge (CAUSES, SUPERSEDES, RELATES_TO, PART_OF, DEPENDS_ON) between two memory node IDs","inputSchema":{"type":"object","properties":{"source_id":{"type":"integer"},"target_id":{"type":"integer"},"kind":{"type":"string"},"weight":{"type":"number"}},"required":["source_id","target_id"]}}"#,
                 r#"{"name":"mem_stats","description":"Return live telemetry and node/edge counts for the active .pmem store","inputSchema":{"type":"object","properties":{}}}"#
             ),
@@ -922,6 +1013,38 @@ fn cmd_mcp(args: &[String]) -> Result<(), String> {
                         );
                         let _ = mem.save(&path);
                         format_report_json(&rep, mem.last_mmap_native)
+                    }
+                    "mem_forget" | "mem_delete" => {
+                        let target_id = extract_json_num(trimmed, "id").map(|n| n as u64);
+                        let query = extract_json_str(trimmed, "query");
+
+                        let result = if let Some(id) = target_id {
+                            let content = mem.records.iter().find(|r| r.id == id && !r.is_tombstoned()).map(|r| r.content.clone());
+                            if mem.forget(id) {
+                                Some((id, content.unwrap_or_default()))
+                            } else {
+                                None
+                            }
+                        } else if let Some(ref q) = query {
+                            mem.forget_query(q)
+                        } else {
+                            None
+                        };
+
+                        if let Some((id, text)) = result {
+                            let _ = mem.save(&path);
+                            let active = mem.records.iter().filter(|r| !r.is_tombstoned()).count();
+                            format!(
+                                "{{\"status\":\"forgotten\",\"id\":{},\"content\":\"{}\",\"active_nodes\":{}}}",
+                                id,
+                                escape_json(&text),
+                                active
+                            )
+                        } else {
+                            format!(
+                                "{{\"status\":\"not_found\",\"message\":\"No active memory matched ID or query to forget\"}}"
+                            )
+                        }
                     }
                     "mem_link" => {
                         let src = extract_json_num(trimmed, "source_id").unwrap_or(0.0) as u64;

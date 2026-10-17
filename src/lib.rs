@@ -267,5 +267,66 @@ mod tests {
             rep.hits[0].bm25_score
         );
     }
+
+    #[test]
+    fn test_forget_and_tombstone_lifecycle() {
+        let mut mem = PyintelMem::new(128, 604_800.0);
+        let id1 = mem.store(
+            None,
+            "security",
+            "Temporary staging token: sk-temp-999888777",
+            vec!["auth".into()],
+            None,
+            1.0,
+            false,
+            Some(1_790_000_000),
+        );
+        let id2 = mem.store(
+            None,
+            "security",
+            "Production API gateway is active on port 20128",
+            vec!["gateway".into()],
+            None,
+            1.5,
+            false,
+            Some(1_790_000_010),
+        );
+
+        // Both are active initially
+        let rep1 = mem.recall("staging token sk-temp", QueryOptions::default());
+        assert_eq!(rep1.hits[0].id, id1);
+
+        // Forget id1 by ID
+        assert!(mem.forget(id1));
+        assert!(!mem.forget(id1), "Second forget should return false");
+
+        // Subsequent recall should NEVER surface id1
+        let rep2 = mem.recall("staging token sk-temp", QueryOptions::default());
+        assert!(rep2.hits.iter().all(|h| h.id != id1));
+
+        // Forget id2 by query
+        let forgotten = mem.forget_query("production api gateway");
+        assert!(forgotten.is_some());
+        let (forgotten_id, _) = forgotten.unwrap();
+        assert_eq!(forgotten_id, id2);
+
+        // Active node count is now 0
+        let active = mem.records.iter().filter(|r| !r.is_tombstoned()).count();
+        assert_eq!(active, 0);
+
+        // Save to disk and reload: tombstones must persist across sessions
+        let tmp_path = PathBuf::from("target").join("test_tombstone_persist.pmem");
+        let _ = std::fs::remove_file(&tmp_path);
+        mem.save(&tmp_path).expect("save pmem");
+
+        let mut loaded = PyintelMem::load_mmap(&tmp_path).expect("load pmem");
+        let loaded_active = loaded.records.iter().filter(|r| !r.is_tombstoned()).count();
+        assert_eq!(loaded_active, 0);
+
+        let rep3 = loaded.recall("staging token", QueryOptions::default());
+        assert!(rep3.hits.is_empty());
+
+        let _ = std::fs::remove_file(&tmp_path);
+    }
 }
 

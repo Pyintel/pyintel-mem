@@ -38,6 +38,14 @@ export interface ScoredHit {
   access_count: number;
 }
 
+export interface ForgetResult {
+  status: string;
+  id: number;
+  active_nodes: number;
+  content: string;
+  file: string;
+}
+
 export interface RecallReport {
   route: string;
   latency_micros: number;
@@ -116,5 +124,15 @@ export class PyintelMem {
 
     const out = execFileSync(this.binPath, args, { encoding: "utf-8" });
     return JSON.parse(out.trim());
+  }
+
+  forget(idOrQuery: number | string): ForgetResult {
+    const args = ["forget", this.dbPath, String(idOrQuery), "--json"];
+    const out = execFileSync(this.binPath, args, { encoding: "utf-8" });
+    return JSON.parse(out.trim());
+  }
+
+  delete(idOrQuery: number | string): ForgetResult {
+    return this.forget(idOrQuery);
   }
 }
