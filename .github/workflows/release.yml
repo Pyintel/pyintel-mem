@@ -7,17 +7,27 @@ on:
   workflow_dispatch:
     inputs:
       tag_name:
-        description: "Release tag (e.g. v0.1.1)"
+        description: "Release tag (e.g. v0.1.2)"
         required: true
-        default: "v0.1.1"
+        default: "v0.1.2"
 
 permissions:
   contents: write
 
 jobs:
   build-windows:
-    name: Build (Windows x86_64)
+    name: Build (Windows ${{ matrix.arch }})
     runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            target: x86_64-pc-windows-msvc
+            asset: pmem-windows-x86_64.exe
+          - arch: arm64
+            target: aarch64-pc-windows-msvc
+            asset: pmem-windows-arm64.exe
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -25,10 +35,10 @@ jobs:
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
         with:
-          targets: x86_64-pc-windows-msvc
+          targets: ${{ matrix.target }}
 
       - name: Build Release Binary
-        run: cargo build --release --target x86_64-pc-windows-msvc
+        run: cargo build --release --target ${{ matrix.target }}
 
       - name: Sign Windows Binary with Pyintel Certificate
         shell: pwsh
@@ -39,19 +49,19 @@ jobs:
             -NotAfter (Get-Date).AddYears(5)
           
           # Sign binary with Authenticode
-          Set-AuthenticodeSignature -Certificate $cert -FilePath "target/x86_64-pc-windows-msvc/release/pmem.exe"
-          Get-AuthenticodeSignature "target/x86_64-pc-windows-msvc/release/pmem.exe"
+          Set-AuthenticodeSignature -Certificate $cert -FilePath "target/${{ matrix.target }}/release/pmem.exe"
+          Get-AuthenticodeSignature "target/${{ matrix.target }}/release/pmem.exe"
           
           # Copy to release asset
-          Copy-Item "target/x86_64-pc-windows-msvc/release/pmem.exe" "pmem-windows-x86_64.exe"
+          Copy-Item "target/${{ matrix.target }}/release/pmem.exe" "${{ matrix.asset }}"
 
       - name: Upload Windows Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: windows-artifact
-          path: pmem-windows-x86_64.exe
+          name: windows-${{ matrix.arch }}-artifact
+          path: ${{ matrix.asset }}
 
-  build-linux:
+  build-linux-x86_64:
     name: Build (Linux x86_64)
     runs-on: ubuntu-latest
     steps:
@@ -69,14 +79,45 @@ jobs:
           cp target/x86_64-unknown-linux-gnu/release/pmem pmem-linux-x86_64
           chmod +x pmem-linux-x86_64
 
-      - name: Upload Linux Artifact
+      - name: Upload Linux x86_64 Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: linux-artifact
+          name: linux-x86_64-artifact
           path: pmem-linux-x86_64
 
+  build-linux-arm64:
+    name: Build (Linux ARM64 / Raspberry Pi / Jetson)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install ARM64 Cross Linker
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-unknown-linux-gnu
+
+      - name: Build Release Binary
+        env:
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
+        run: |
+          cargo build --release --target aarch64-unknown-linux-gnu
+          cp target/aarch64-unknown-linux-gnu/release/pmem pmem-linux-arm64
+          chmod +x pmem-linux-arm64
+
+      - name: Upload Linux ARM64 Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-arm64-artifact
+          path: pmem-linux-arm64
+
   build-macos:
-    name: Build (macOS Universal + Apple Silicon + Intel)
+    name: Build (macOS Apple Silicon ARM64 + Universal + Intel)
     runs-on: macos-latest
     steps:
       - name: Checkout repository
@@ -117,7 +158,7 @@ jobs:
 
   publish:
     name: Publish GitHub Release
-    needs: [build-windows, build-linux, build-macos]
+    needs: [build-windows, build-linux-x86_64, build-linux-arm64, build-macos]
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
