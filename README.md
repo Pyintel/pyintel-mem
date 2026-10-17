@@ -19,25 +19,28 @@ Most AI agent memory libraries (Chroma, Qdrant, LangChain vector wrappers) requi
 | **Vector Quantization** | 32-bit `float32` (`4D` bytes) | Symmetric `int8` (`SQ8`) + 1-bit Binary (`BQ1` hardware `POPCNT`) |
 | **Retrieval Signals** | Dense vector only | **4-Signal Hybrid**: `SQ8`/`BQ1` Vector + Okapi BM25 + 2-Hop Graph Boost + Ebbinghaus Decay |
 | **Filtered Recall** | Naive post-filtering (loses recall at `<5%` selectivity) | **Adaptive Selectivity Router**: switches to pre-filtered SIMD `SQ8` scan below 15% selectivity |
-| **Memory Lifecycle** | Static text chunks | Spaced-repetition exponential decay + `SUPERSEDES` graph edge pruning |
+| **Memory Lifecycle** | Static text chunks | Spaced-repetition exponential decay + `SUPERSEDES` graph edge pruning + automatic duplicate consolidation |
+| **Typo & Code Resilience** | Misses typos or CamelCase identifiers | **Damerau-Levenshtein $\le 1$** fuzzy typo recovery + CamelCase/alphanumeric boundary splitting (`AutoVLA`, `RP2350`, `0x4C58`) + gapped character skip-grams |
+| **Federated Search** | Single database instance | **`pmem global`** searches across every tracked `.pmem` store on disk in `< 100 µs` |
+| **Binary Footprint** | Hundreds of MBs (Docker / Python venv) | **`536.5 KB`** standalone `pmem.exe` binary (`0` external Rust crates) |
 
 ---
 
 ## Empirical Benchmark (`pmem bench --nodes 2500 --dim 128`)
 
-Measured on Windows (`x86_64-pc-windows-gnu`, `rustc 1.99.1 --release`, LTO enabled):
+Measured on Windows (`x86_64-pc-windows-gnu`, `rustc 1.99.1 --release`, LTO + strip + `panic="abort"`):
 
 | Metric | Measured Result |
 |---|---|
+| **Standalone Binary Size (`pmem.exe`)** | **`549,376 bytes` (`536.5 KB`)** — zero external crate dependencies |
 | **Nodes & Graph Edges Indexed** | `2,500` nodes (`128-D`) + `833` directed graph edges |
-| **`.pmem` Single-File Size** | `1,116,252 bytes` (`1,090.09 KB` total — **`446.5 bytes/node`** including vectors, serialized HNSW layers, edges, and UTF-8 text) |
-| **Index Build Throughput** | `228.92 ms` total (`91.6 µs/node`) |
-| **`.pmem` Atomic Save Time** | `38.11 ms` |
-| **OS `mmap` Load + $O(N)$ HNSW Restore** | **`26.32 ms`** (`native_mmap = true`, `FLAG_HNSW_CSR` eliminates graph rebuild on load — **8.1x faster** than cold HNSW insertion) |
-| **Selective Filtered Query (`5%` selectivity)** | **`332.2 µs` (`0.33 ms`) p50** / `936.7 µs` p99 (`prefiltered_simd_sq8`, 100% filtered recall) |
-| **Broad Unfiltered Query (`2,500` nodes)** | **`611.5 µs` (`0.61 ms`) p50** / `1,297.7 µs` p99 (`hnsw_in_graph` + BM25 + 2-hop graph activation) |
+| **`.pmem` Single-File Size** | `1,114,136 bytes` (`1,088.02 KB` total — **`445.7 bytes/node`** including vectors, serialized HNSW layers, edges, and UTF-8 text) |
+| **Single-Store Query (`16`–`21` nodes)** | **`31.0 µs – 52.9 µs`** (`native_mmap = true`) |
+| **Federated `pmem global` (3 `.pmem` stores)** | **`84.0 µs` query** (`1.00 ms` total including OS `mmap` across all 3 stores) |
+| **Selective Filtered Query (`5%` selectivity, `2,500` nodes)** | **`332.2 µs` – `417.6 µs` p50** (`prefiltered_simd_sq8`, 100% filtered recall) |
+| **Broad Unfiltered Query (`2,500` nodes)** | **`611.5 µs` – `637.0 µs` p50** (`hnsw_in_graph` + BM25 + 2-hop graph activation) |
 
-> **Note on Embeddings:** By default, when raw `f32` embedding vectors are not passed explicitly by the caller, `pyintel-mem` uses a fast deterministic CountSketch n-gram/bigram projection (`deterministic_text_embedding`) paired with Okapi BM25. For neural semantic embeddings, callers can pass dense `f32` vectors from `google/embeddinggemma-2` or any ONNX/local embedder directly to `PyintelMem::store()`.
+> **Note on Embeddings:** By default, when raw `f32` embedding vectors are not passed explicitly by the caller, `pyintel-mem` uses a fast deterministic CountSketch n-gram/skip-gram/bigram projection (`deterministic_text_embedding`) paired with `u64` hash-keyed Okapi BM25. For neural semantic embeddings, callers can pass dense `f32` vectors from `google/embeddinggemma-2` or any ONNX/local embedder directly to `PyintelMem::store()`.
 
 ---
 
@@ -45,19 +48,19 @@ Measured on Windows (`x86_64-pc-windows-gnu`, `rustc 1.99.1 --release`, LTO enab
 
 ```
 pyintel-mem/
-├── Cargo.toml                   # Zero-dependency Rust crate & CLI manifest
+├── Cargo.toml                   # Zero-dependency Rust crate & CLI manifest (536.5 KB release binary)
 ├── spec/
 │   └── pmem-format.md           # Canonical 64-byte header & .pmem binary format specification
 ├── src/
-│   ├── lib.rs                   # Public Rust library API & unit test suite
+│   ├── lib.rs                   # Public Rust library API & unit test suite (5/5 passing)
 │   ├── format.rs                # .pmem binary codec, IEEE CRC-32, and Windows/POSIX OS mmap
-│   ├── quant.rs                 # SQ8 (symmetric int8) & BQ1 (1-bit POPCNT) quantization kernels
-│   ├── hnsw.rs                  # Multi-layer HNSW graph + Adaptive Selectivity Router
-│   ├── bm25.rs                  # Okapi BM25 lexical inverted index for exact identifiers/code
+│   ├── quant.rs                 # SQ8 (symmetric int8), BQ1 (1-bit POPCNT) & skip-gram CountSketch
+│   ├── hnsw.rs                  # Multi-layer HNSW graph + Adaptive Selectivity Router + CSR codec
+│   ├── bm25.rs                  # Hash-keyed Okapi BM25 + CamelCase splitter + edit-dist<=1 typo recovery
 │   ├── graph.rs                 # Typed temporal knowledge graph & 2-hop spreading activation
-│   ├── engine.rs                # Unified 4-signal hybrid engine & spaced-repetition decay
+│   ├── engine.rs                # Unified 4-signal hybrid engine, synergy & auto-consolidation
 │   └── bin/
-│       └── pmem.rs              # CLI, benchmark runner & JSON-RPC 2.0 MCP stdio server
+│       └── pmem.rs              # CLI, federated `pmem global` registry, bench & MCP stdio server
 └── sdk/
     ├── python/                  # Zero-dependency Python SDK (`pyintel_mem`)
     └── ts/                      # TypeScript / Node.js SDK (`@pyintel/mem`)
@@ -67,23 +70,23 @@ pyintel-mem/
 
 ## Quickstart
 
-### 1. Build & Run CLI
+### 1. Install & Run Shorthand CLI (`pmem`)
 ```powershell
-cargo test
-cargo build --release
+cargo install --path .
 
-# Initialize a .pmem store
-.\target\release\pmem.exe init agent.pmem --dim 128
-
-# Store memories
-.\target\release\pmem.exe store agent.pmem --ns apex --tags network,udp --text "Apex Studio UDP listener migrated to port 4141 (0x4C 0x58)"
-.\target\release\pmem.exe store agent.pmem --ns apex --tags firewall --text "Inbound UDP firewall rule must allow the Apex Studio ingest port"
+# Store memories (defaults to workspace.pmem or $PMEM_FILE when path is omitted)
+pmem store "Apex Studio UDP listener migrated to port 4141 (0x4C 0x58)" --ns apex --tags network,udp --importance 2.0
+pmem store "Inbound UDP firewall rule must allow the Apex Studio ingest port" --ns apex --tags firewall
 
 # Link causal/temporal graph edges
-.\target\release\pmem.exe link agent.pmem --src 1 --dst 2 --kind CAUSES --weight 0.95
+pmem link --src 1 --dst 2 --kind CAUSES --weight 0.95
 
-# Hybrid 4-signal recall
-.\target\release\pmem.exe recall agent.pmem "What UDP port does Apex Studio use?"
+# Hybrid 4-signal recall (resilient to typos like 'scre' -> 'score')
+pmem recall "what is the autoVLA ADE scre?"
+
+# Federated global search across EVERY tracked .pmem store on disk
+pmem global list
+pmem global "what is the autoVLA ADE scre?"
 ```
 
 ### 2. Mount as an MCP Server (Antigravity / Apex Arc / Claude Code)
@@ -91,10 +94,11 @@ cargo build --release
 {
   "mcpServers": {
     "pyintel-mem": {
-      "command": "P:/Projects/Pyintel/Pyintel/pyintel-mem/target/release/pmem.exe",
-      "args": ["mcp", "P:/Projects/Pyintel/Pyintel/pyintel-mem/agent.pmem"]
+      "command": "pmem",
+      "args": ["mcp", "P:/Projects/Pyintel/Pyintel/pyintel-mem/workspace.pmem"]
     }
   }
 }
 ```
 Exposes `mem_store`, `mem_recall`, `mem_link`, and `mem_stats` over JSON-RPC 2.0 stdio.
+
